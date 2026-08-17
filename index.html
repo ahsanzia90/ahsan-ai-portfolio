@@ -1445,6 +1445,7 @@ section:not(.hero), footer{
   }
   .avatar-3d-mount, .avatar-3d-mount.loaded { opacity:1 !important; visibility:visible !important; }
 </style>
+<link rel="preload" href="avatar.glb" as="fetch" crossorigin="anonymous">
 </head>
 <body>
 
@@ -1647,7 +1648,7 @@ window.Avatar3D = (function(){
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(26, w/h, 0.1, 100);
     renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, window.innerWidth <= 768 ? 1.15 : 1.5));
     renderer.setSize(w,h);
     renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1662,6 +1663,7 @@ window.Avatar3D = (function(){
 
     // Load the avatar as a separate cached asset. This keeps index.html small
     // and prevents a 14MB base64 decode from blocking the main thread.
+    THREE.Cache.enabled = true;
     const loader = new THREE.GLTFLoader();
     loader.load(AVATAR_GLB_URL, gltf => {
       root = gltf.scene;
@@ -1685,13 +1687,20 @@ window.Avatar3D = (function(){
       frameHead();
       ready = true;
       mountEl.classList.add('loaded');
-      const avatarLoading = document.getElementById('avatarLoading');
-      if(avatarLoading) avatarLoading.classList.add('hidden');
       animate();
+      // Keep the spinner until the model has actually rendered at least once.
+      requestAnimationFrame(() => {
+        const avatarLoading = document.getElementById('avatarLoading');
+        if(avatarLoading) avatarLoading.classList.add('hidden');
+      });
     }, err => {
       console.error('Avatar GLB failed to parse', err);
       const avatarLoading = document.getElementById('avatarLoading');
-      if(avatarLoading) avatarLoading.classList.add('hidden');
+      if(avatarLoading){
+        const ring = avatarLoading.querySelector('.loader-ring');
+        if(ring) ring.setAttribute('aria-label','Avatar failed to load');
+      }
+      // Do not pretend loading is complete when the model failed.
       animate();
     });
 
@@ -1779,10 +1788,11 @@ window.Avatar3D = (function(){
 
   function animate(){
     requestAnimationFrame(animate);
-    const delta=clock.getDelta(), t=clock.elapsedTime;
+    const rawDelta = clock.getDelta();
+    const delta = Math.min(rawDelta, 0.033);
+    const t=clock.elapsedTime;
     if(mixer) mixer.update(delta);
 
-    if(root) root.rotation.set(0,BASE_YAW,0);
 
     if(speechActive && !speechPaused && speechWords.length){
       const word=speechWords[currentWordIndex]||'';
@@ -2727,8 +2737,7 @@ document.addEventListener('DOMContentLoaded', () => {
     stopSpeech(){ if(window.Avatar3D) window.Avatar3D.stopSpeech(); },
     pulseMouth(){ if(window.Avatar3D) window.Avatar3D.pulseMouth(); }
   };
-  // Safety: avatar spinner only; never block the page UI.
-  setTimeout(() => { const l=document.getElementById('avatarLoading'); if(l) l.classList.add('hidden'); }, 20000);
+  // Spinner is dismissed only by Avatar3D after the model has rendered.
 
   // -- Nav scroll state --
   const nav = document.getElementById('nav');
