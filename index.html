@@ -1647,8 +1647,9 @@ window.Avatar3D = (function(){
     const w = Math.max(1, mountEl.clientWidth), h = Math.max(1, mountEl.clientHeight);
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(26, w/h, 0.1, 100);
-    renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, window.innerWidth <= 768 ? 1.15 : 1.5));
+    renderer = new THREE.WebGLRenderer({antialias:true, alpha:true, powerPreference:'high-performance', preserveDrawingBuffer:false});
+    const isMobile = window.innerWidth <= 768;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2));
     renderer.setSize(w,h);
     renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1725,7 +1726,7 @@ window.Avatar3D = (function(){
   function resize(mountEl){
     if(!renderer) return;
     const w=Math.max(1,mountEl.clientWidth), h=Math.max(1,mountEl.clientHeight);
-    camera.aspect=w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h);
+    camera.aspect=w/h; camera.updateProjectionMatrix(); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, window.innerWidth <= 768 ? 1.5 : 2)); renderer.setSize(w,h, false);
   }
 
   function setMorph(mesh,name,value){
