@@ -1676,7 +1676,7 @@ window.Avatar3D = (function(){
         mixer = new THREE.AnimationMixer(root);
         const action = mixer.clipAction(gltf.animations[0]);
         action.setLoop(THREE.LoopRepeat, Infinity);
-        action.timeScale = 0.72;
+        action.timeScale = 1.0;
         action.play();
       }
 
@@ -1789,7 +1789,7 @@ window.Avatar3D = (function(){
   function animate(){
     requestAnimationFrame(animate);
     const rawDelta = clock.getDelta();
-    const delta = Math.min(rawDelta, 0.033);
+    const delta = Math.min(rawDelta, 0.1);
     const t=clock.elapsedTime;
     if(mixer) mixer.update(delta);
 
