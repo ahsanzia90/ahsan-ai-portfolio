@@ -2531,7 +2531,6 @@ const TTS = {
   loadVoices(){
     if(!('speechSynthesis' in window)) return [];
     this.voices=window.speechSynthesis.getVoices()||[];
-    if(this.voices.length && !this.selectedVoice) this.selectedVoice=this.pickMaleVoice();
     return this.voices;
   },
 
@@ -2590,21 +2589,20 @@ const TTS = {
     if(!('speechSynthesis' in window)) return;
     try{
       this.loadVoices();
-      window.speechSynthesis.cancel();
+      this.selectedVoice=this.pickMaleVoice() || this.selectedVoice;
       window.speechSynthesis.resume();
-
-      // iOS Safari often requires an actual speak() call during a user
-      // gesture before later programmatic speech is allowed.
-      const unlock = new SpeechSynthesisUtterance(' ');
-      unlock.volume = 0.01;
-      unlock.rate = 10;
-      unlock.onstart = () => {
-        try{ window.speechSynthesis.cancel(); }catch(e){}
-      };
-      unlock.onerror = () => {
-        try{ window.speechSynthesis.cancel(); }catch(e){}
-      };
-      window.speechSynthesis.speak(unlock);
+      // iOS Safari needs a real speech call during a user gesture before
+      // later programmatic speech is reliably allowed. Keep this tiny and
+      // quiet; importantly, do NOT cancel it immediately.
+      if(!this._gesturePrimed){
+        const u=new SpeechSynthesisUtterance(' ');
+        u.volume=0.01;
+        u.rate=10;
+        if(this.selectedVoice) u.voice=this.selectedVoice;
+        u.onend=()=>{ this._gesturePrimed=true; };
+        u.onerror=()=>{ this._gesturePrimed=true; };
+        window.speechSynthesis.speak(u);
+      }
     }catch(e){}
   },
 
@@ -2615,15 +2613,12 @@ const TTS = {
       return;
     }
     const token=++this.currentToken;
-    // IMPORTANT for iOS/Safari: do not await voices here. Awaiting a
-    // voiceschanged event moves speech.synthesis.speak() outside the user's
-    // interaction window and Safari may silently block it.
+    // IMPORTANT: do not await voiceschanged here. On iOS Safari that can move
+    // speak() outside the user-gesture window and Safari may refuse playback.
+    // Use the voice already cached during page load / first interaction.
+    this.loadVoices();
     const voice=this.selectedVoice || this.pickMaleVoice();
     if(voice) this.selectedVoice=voice;
-    if(!voice){
-      onEnd?.(new Error('No male English browser voice is available on this device.'));
-      return;
-    }
     const utter=new SpeechSynthesisUtterance(text);
     this.utterance=utter;
     this.paused=false;
@@ -2680,11 +2675,12 @@ const TTS = {
     this.utterance=null;this.paused=false;this.started=false;this.lastWordIndex=-1;
   }
 };
-TTS.init=()=>TTS.loadVoices();
+TTS.init=()=>{ TTS.loadVoices(); TTS.selectedVoice=TTS.pickMaleVoice(); };
 TTS.init();
 
-// Native browser speech is intentionally used here. On iOS/Safari, prime the
-// speech engine during a real user gesture so later answer playback is allowed.
+// Native browser speech is intentionally used here. Prime the speech engine on
+// the first real interaction so Safari/iOS has a user-gesture opportunity to
+// initialize its speech subsystem.
 let ttsGestureUnlocked=false;
 const unlockTTSFromGesture=()=>{
   if(ttsGestureUnlocked) return;
@@ -2692,13 +2688,10 @@ const unlockTTSFromGesture=()=>{
   TTS.prime();
 };
 ['touchstart','pointerdown','click','keydown'].forEach(evt=>{
-  document.addEventListener(evt,unlockTTSFromGesture,{passive:true,capture:true});
+  document.addEventListener(evt,unlockTTSFromGesture,{once:true,passive:true,capture:true});
 });
 if('speechSynthesis' in window){
-  window.speechSynthesis.addEventListener?.('voiceschanged',()=>{
-    TTS.loadVoices();
-    if(!TTS.selectedVoice) TTS.selectedVoice=TTS.pickMaleVoice();
-  });
+  window.speechSynthesis.addEventListener?.('voiceschanged',()=>{ TTS.loadVoices(); if(!TTS.selectedVoice) TTS.selectedVoice=TTS.pickMaleVoice(); });
 }
 
 /* ================================================================================
