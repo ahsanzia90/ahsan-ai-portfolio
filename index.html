@@ -2521,6 +2521,7 @@ function askPortfolioAssistant(question, conversationHistory){
 const TTS = {
   utterance:null,
   voices:[],
+  selectedVoice:null,
   enabled:true,
   paused:false,
   started:false,
@@ -2530,6 +2531,7 @@ const TTS = {
   loadVoices(){
     if(!('speechSynthesis' in window)) return [];
     this.voices=window.speechSynthesis.getVoices()||[];
+    if(this.voices.length && !this.selectedVoice) this.selectedVoice=this.pickMaleVoice();
     return this.voices;
   },
 
@@ -2587,22 +2589,37 @@ const TTS = {
   prime(){
     if(!('speechSynthesis' in window)) return;
     try{
-      window.speechSynthesis.getVoices();
+      this.loadVoices();
       window.speechSynthesis.cancel();
       window.speechSynthesis.resume();
+
+      // iOS Safari often requires an actual speak() call during a user
+      // gesture before later programmatic speech is allowed.
+      const unlock = new SpeechSynthesisUtterance(' ');
+      unlock.volume = 0.01;
+      unlock.rate = 10;
+      unlock.onstart = () => {
+        try{ window.speechSynthesis.cancel(); }catch(e){}
+      };
+      unlock.onerror = () => {
+        try{ window.speechSynthesis.cancel(); }catch(e){}
+      };
+      window.speechSynthesis.speak(unlock);
     }catch(e){}
   },
 
-  async speak(text,{onStart,onEnd,onWord}={}){
+  speak(text,{onStart,onEnd,onWord}={}){
     this.stop();
     if(!('speechSynthesis' in window)){
       onEnd?.(new Error('Speech synthesis is not supported in this browser.'));
       return;
     }
     const token=++this.currentToken;
-    await this.waitForVoices();
-    if(token!==this.currentToken) return;
-    const voice=this.pickMaleVoice();
+    // IMPORTANT for iOS/Safari: do not await voices here. Awaiting a
+    // voiceschanged event moves speech.synthesis.speak() outside the user's
+    // interaction window and Safari may silently block it.
+    const voice=this.selectedVoice || this.pickMaleVoice();
+    if(voice) this.selectedVoice=voice;
     if(!voice){
       onEnd?.(new Error('No male English browser voice is available on this device.'));
       return;
@@ -2666,9 +2683,8 @@ const TTS = {
 TTS.init=()=>TTS.loadVoices();
 TTS.init();
 
-// Native browser speech is intentionally used here. Prime the speech engine on
-// the first real interaction so Safari/iOS has a user-gesture opportunity to
-// initialize its speech subsystem.
+// Native browser speech is intentionally used here. On iOS/Safari, prime the
+// speech engine during a real user gesture so later answer playback is allowed.
 let ttsGestureUnlocked=false;
 const unlockTTSFromGesture=()=>{
   if(ttsGestureUnlocked) return;
@@ -2676,10 +2692,13 @@ const unlockTTSFromGesture=()=>{
   TTS.prime();
 };
 ['touchstart','pointerdown','click','keydown'].forEach(evt=>{
-  document.addEventListener(evt,unlockTTSFromGesture,{once:true,passive:true,capture:true});
+  document.addEventListener(evt,unlockTTSFromGesture,{passive:true,capture:true});
 });
 if('speechSynthesis' in window){
-  window.speechSynthesis.addEventListener?.('voiceschanged',()=>TTS.loadVoices());
+  window.speechSynthesis.addEventListener?.('voiceschanged',()=>{
+    TTS.loadVoices();
+    if(!TTS.selectedVoice) TTS.selectedVoice=TTS.pickMaleVoice();
+  });
 }
 
 /* ================================================================================
