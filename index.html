@@ -2527,6 +2527,8 @@ const TTS = {
   started:false,
   currentToken:0,
   lastWordIndex:-1,
+  _gesturePrimed:false,
+  _retryTimer:null,
 
   loadVoices(){
     if(!('speechSynthesis' in window)) return [];
@@ -2534,33 +2536,11 @@ const TTS = {
     return this.voices;
   },
 
-  async waitForVoices(timeout=1800){
-    if(!('speechSynthesis' in window)) return [];
-    let voices=this.loadVoices();
-    if(voices.length) return voices;
-    return await new Promise(resolve=>{
-      let done=false;
-      const finish=()=>{
-        if(done) return;
-        done=true;
-        clearTimeout(timer);
-        try{ window.speechSynthesis.removeEventListener('voiceschanged', onChange); }catch(e){}
-        resolve(this.loadVoices());
-      };
-      const onChange=()=>finish();
-      const timer=setTimeout(finish, timeout);
-      try{ window.speechSynthesis.addEventListener('voiceschanged', onChange); }catch(e){}
-      try{ window.speechSynthesis.getVoices(); }catch(e){}
-    });
-  },
-
   pickMaleVoice(){
     const voices=this.loadVoices();
     if(!voices.length) return null;
     const english=voices.filter(v=>/^en(?:-|_|$)/i.test(v.lang||''));
     const candidates=english.length ? english : voices;
-
-    // Same voice-selection order used by the earlier working version.
     const preferred=[
       /Microsoft Guy Online \(Natural\)/i,
       /Microsoft Ryan Online \(Natural\)/i,
@@ -2570,17 +2550,16 @@ const TTS = {
       /Microsoft Thomas Online \(Natural\)/i,
       /Microsoft George Online \(Natural\)/i,
       /Google UK English Male/i,
-      /Google US English/i,
       /Daniel/i,
-      /Alex/i
+      /Alex/i,
+      /Fred/i
     ];
     for(const pattern of preferred){
       const found=candidates.find(v=>pattern.test(v.name||''));
       if(found) return found;
     }
-
     const female=/Samantha|Victoria|Karen|Moira|Tessa|Zira|Susan|Hazel|Fiona|Google UK English Female|Microsoft Aria|Jenny|Emma|Sonia/i;
-    return candidates.find(v=>/male|guy|ryan|andrew|brian|daniel|alex|george|david|mark/i.test(v.name||'') && !female.test(v.name||''))
+    return candidates.find(v=>/male|guy|ryan|andrew|brian|daniel|alex|george|david|mark|fred/i.test(v.name||'') && !female.test(v.name||''))
       || candidates.find(v=>!female.test(v.name||''))
       || null;
   },
@@ -2591,12 +2570,11 @@ const TTS = {
       this.loadVoices();
       this.selectedVoice=this.pickMaleVoice() || this.selectedVoice;
       window.speechSynthesis.resume();
-      // iOS Safari needs a real speech call during a user gesture before
-      // later programmatic speech is reliably allowed. Keep this tiny and
-      // quiet; importantly, do NOT cancel it immediately.
       if(!this._gesturePrimed){
-        const u=new SpeechSynthesisUtterance(' ');
-        u.volume=0.01;
+        // A real, near-silent utterance during the user's first gesture gives
+        // iOS Safari a speech-session to reuse later. Do not cancel it here.
+        const u=new SpeechSynthesisUtterance('.');
+        u.volume=0.001;
         u.rate=10;
         if(this.selectedVoice) u.voice=this.selectedVoice;
         u.onend=()=>{ this._gesturePrimed=true; };
@@ -2613,9 +2591,6 @@ const TTS = {
       return;
     }
     const token=++this.currentToken;
-    // IMPORTANT: do not await voiceschanged here. On iOS Safari that can move
-    // speak() outside the user-gesture window and Safari may refuse playback.
-    // Use the voice already cached during page load / first interaction.
     this.loadVoices();
     const voice=this.selectedVoice || this.pickMaleVoice();
     if(voice) this.selectedVoice=voice;
@@ -2624,10 +2599,8 @@ const TTS = {
     this.paused=false;
     this.started=false;
     this.lastWordIndex=-1;
-    utter.voice=voice;
-    utter.lang=voice.lang || 'en-US';
-    // Slightly slower and less compressed than the browser default. This
-    // tends to sound more conversational for the selected male voices.
+    utter.voice=voice || null;
+    utter.lang=(voice && voice.lang) || 'en-US';
     utter.rate=0.91;
     utter.pitch=0.92;
     utter.volume=1;
@@ -2635,10 +2608,29 @@ const TTS = {
     let fallbackWordIndex=0;
     const words=text.match(/\S+/g)||[];
     let fallbackTimer=null;
+    let startWatchdog=null;
+    let retried=false;
     const clearFallback=()=>{ if(fallbackTimer){clearInterval(fallbackTimer);fallbackTimer=null;} };
+    const clearWatchdog=()=>{ if(startWatchdog){clearTimeout(startWatchdog);startWatchdog=null;} };
+
+    const actuallySpeak=()=>{
+      if(token!==this.currentToken) return;
+      try{
+        window.speechSynthesis.resume();
+        window.speechSynthesis.speak(utter);
+      }catch(e){
+        if(!retried){
+          retried=true;
+          setTimeout(actuallySpeak,120);
+        }else{
+          this.utterance=null; onEnd?.(e);
+        }
+      }
+    };
 
     utter.onstart=()=>{
       if(token!==this.currentToken) return;
+      clearWatchdog();
       this.started=true; this.paused=false; onStart?.();
       clearFallback(); fallbackWordIndex=0;
       fallbackTimer=setInterval(()=>{
@@ -2657,20 +2649,60 @@ const TTS = {
     utter.onresume=()=>{ if(token===this.currentToken)this.paused=false; };
     utter.onend=()=>{
       if(token!==this.currentToken)return;
-      clearFallback();this.utterance=null;this.started=false;this.paused=false;onEnd?.();
+      clearFallback();clearWatchdog();this.utterance=null;this.started=false;this.paused=false;onEnd?.();
     };
     utter.onerror=(e)=>{
       if(token!==this.currentToken)return;
-      clearFallback();this.utterance=null;this.started=false;this.paused=false;onEnd?.(e);
+      clearFallback();clearWatchdog();
+      // iOS Safari can occasionally reject an otherwise valid utterance after
+      // the speech engine has gone idle. Re-prime/resume once, without touching
+      // the avatar or answer UI.
+      if(!retried && e && e.error !== 'canceled' && e.error !== 'interrupted'){
+        retried=true;
+        this.loadVoices();
+        this.selectedVoice=this.pickMaleVoice() || this.selectedVoice;
+        setTimeout(()=>{
+          if(token!==this.currentToken) return;
+          try{ window.speechSynthesis.cancel(); window.speechSynthesis.resume(); window.speechSynthesis.speak(utter); }catch(_e){
+            this.utterance=null;this.started=false;this.paused=false;onEnd?.(e);
+          }
+        },140);
+        return;
+      }
+      this.utterance=null;this.started=false;this.paused=false;onEnd?.(e);
     };
-    try{ window.speechSynthesis.cancel(); window.speechSynthesis.speak(utter); }
-    catch(e){this.utterance=null;onEnd?.(e);}
+
+    // If Safari accepts speak() but never fires onstart, retry once. This is
+    // intentionally conservative so a normal utterance is never duplicated.
+    startWatchdog=setTimeout(()=>{
+      if(token!==this.currentToken || this.started || retried) return;
+      retried=true;
+      try{
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.resume();
+        this.loadVoices();
+        this.selectedVoice=this.pickMaleVoice() || this.selectedVoice;
+        if(this.selectedVoice) utter.voice=this.selectedVoice;
+        window.speechSynthesis.speak(utter);
+      }catch(e){
+        this.utterance=null;onEnd?.(e);
+      }
+    },1300);
+
+    try{
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume();
+      actuallySpeak();
+    }catch(e){
+      this.utterance=null;onEnd?.(e);
+    }
   },
 
   pause(){try{window.speechSynthesis?.pause();this.paused=true;}catch(e){}},
   resume(){try{window.speechSynthesis?.resume();this.paused=false;}catch(e){}},
   stop(){
     this.currentToken++;
+    if(this._retryTimer){clearTimeout(this._retryTimer);this._retryTimer=null;}
     try{window.speechSynthesis?.cancel();}catch(e){}
     this.utterance=null;this.paused=false;this.started=false;this.lastWordIndex=-1;
   }
@@ -2938,6 +2970,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function askQuestion(q){
     if(!q || !q.trim()) return;
+
+    // Preserve the real user gesture for iOS Safari speech initialization.
+    // This happens before the answer-generation delay, so TTS does not depend
+    // on a later asynchronous callback being treated as a gesture.
+    try{ TTS.prime(); }catch(e){}
 
     // Stop any previous answer before starting another.
     if(activeAnswer.controls || activeAnswer.timer){
